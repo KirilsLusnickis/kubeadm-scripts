@@ -2,75 +2,62 @@
 #
 # Common setup for all servers (Control Plane and Nodes)
 
-set -euxo pipefail
+sudo -i 
+apt-get update && apt-get upgrade -y
 
-# Variable Declaration
+#Install a text editor like nano(an easy to use editor),vim, or emacs
 
-KUBERNETES_VERSION="1.26.1-00"
+apt-get install -y vim
 
-# disable swap
-sudo swapoff -a
+#Install container environment containerd, cri-o, or Docker
 
-# keeps the swaf off during reboot
-(crontab -l 2>/dev/null; echo "@reboot /sbin/swapoff -a") | crontab - || true
-sudo apt-get update -y
+apt install curl apt-transport-https vim git wget gnupg2 \
+software-properties-common lsb-release ca-certificates uidmap -y
 
+#Disable swap if not already done
 
-# Install CRI-O Runtime
+swapoff -a
 
-OS="xUbuntu_22.04"
+#Load modules to ensure they are available for following steps
 
-VERSION="$(echo ${KUBERNETES_VERSION} | grep -oE '[0-9]+\.[0-9]+')"
+modprobe overlay
+modprobe br_netfilter
 
-# Create the .conf file to load the modules at bootup
-cat <<EOF | sudo tee /etc/modules-load.d/crio.conf
-overlay
-br_netfilter
-EOF
+#Update kernel networking to allow necessary traffic  
 
-sudo modprobe overlay
-sudo modprobe br_netfilter
-
-# Set up required sysctl params, these persist across reboots.
-cat <<EOF | sudo tee /etc/sysctl.d/99-kubernetes-cri.conf
-net.bridge.bridge-nf-call-iptables  = 1
-net.ipv4.ip_forward                 = 1
+cat << EOF | tee /etc/sysctl.d/kubernetes.conf
 net.bridge.bridge-nf-call-ip6tables = 1
+net.bridge.bridge-nf-call-iptables = 1
+net.ipv4.ip_forward = 1
 EOF
+sysctl --system
 
-sudo sysctl --system
+#Install the necessary key for the software to install
 
-cat <<EOF | sudo tee /etc/apt/sources.list.d/devel:kubic:libcontainers:stable.list
-deb https://download.opensuse.org/repositories/devel:/kubic:/libcontainers:/stable/$OS/ /
-EOF
-cat <<EOF | sudo tee /etc/apt/sources.list.d/devel:kubic:libcontainers:stable:cri-o:"$VERSION".list
-deb http://download.opensuse.org/repositories/devel:/kubic:/libcontainers:/stable:/cri-o:/$VERSION/$OS/ /
-EOF
+sudo mkdir -p /etc/apt/keyrings
+sudo curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
 
-curl -L https://download.opensuse.org/repositories/devel:kubic:libcontainers:stable:cri-o:"$VERSION"/$OS/Release.key | sudo apt-key --keyring /etc/apt/trusted.gpg.d/libcontainers.gpg add -
-curl -L https://download.opensuse.org/repositories/devel:/kubic:/libcontainers:/stable/$OS/Release.key | sudo apt-key --keyring /etc/apt/trusted.gpg.d/libcontainers.gpg add -
+echo \
+"deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] \
+https://download.docker.com/linux/ubuntu \
+$(lsb_release -cs) stable" | sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
 
-sudo apt-get update
-sudo apt-get install cri-o cri-o-runc -y
+#install the container software
 
-sudo systemctl daemon-reload
-sudo systemctl enable crio --now
+apt-get update && apt-get install containerd.io -y
+containerd config default | sudo tee /etc/containerd/config.toml
+sed -e 's/SystemdCgroup = false/SystemdCgroup = true/g'-i /etc/containerd/config.toml
+systemctl restart containerd
 
-echo "CRI runtime installed susccessfully"
+#Add a GPG key for the packages
 
-# Install kubelet, kubectl and Kubeadm
+curl -s https://packages.cloud.google.com/apt/doc/apt-key.gpg | apt-key add -
+apt-get update
 
-sudo apt-get update
-sudo apt-get install -y apt-transport-https ca-certificates curl
-sudo curl -fsSLo /usr/share/keyrings/kubernetes-archive-keyring.gpg https://packages.cloud.google.com/apt/doc/apt-key.gpg
+#Add install kubelet, kubeadm and kubectl
 
-echo "deb [signed-by=/usr/share/keyrings/kubernetes-archive-keyring.gpg] https://apt.kubernetes.io/ kubernetes-xenial main" | sudo tee /etc/apt/sources.list.d/kubernetes.list
-sudo apt-get update -y
-sudo apt-get install -y kubelet="$KUBERNETES_VERSION" kubectl="$KUBERNETES_VERSION" kubeadm="$KUBERNETES_VERSION"
-sudo apt-get update -y
-sudo apt-get install -y jq
+apt-get install -y kubelet kubeadm kubectl
 
-local_ip="$(ip --json a s | jq -r '.[] | if .ifname == "eth1" then .addr_info[] | if .family == "inet" then .local else empty end else empty end')"
-cat > /etc/default/kubelet << EOF
-KUBELET_EXTRA_ARGS=--node-ip=$local_ip
-EOF
+# Protect the above installed packages from unintended upgrades
+
+apt-mark hold kubelet kubeadm kubectl
